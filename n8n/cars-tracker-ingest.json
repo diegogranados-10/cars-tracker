@@ -1,0 +1,372 @@
+{
+  "name": "cars-tracker-ingest",
+  "meta": {
+    "description": "Telegram YouTube links → Google Sheet Cars tab. No secrets in this file."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"],
+        "additionalFields": {}
+      },
+      "id": "tg-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "webhookId": "cars-tracker-telegram",
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER_TELEGRAM_CREDENTIAL",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function isAllowedUser(fromId, allowedId) {\n  if (fromId === undefined || fromId === null || allowedId === undefined || allowedId === null) {\n    return false;\n  }\n  return String(fromId) === String(allowedId);\n}\n\nconst payload = $input.first().json;\nconst message = payload.message ?? payload;\nconst fromId = message.from?.id;\nif (!isAllowedUser(fromId, $env.TELEGRAM_ALLOWLIST_USER_ID)) {\n  return [];\n}\nreturn [{ json: payload }];"
+      },
+      "id": "allowlist",
+      "name": "Allowlist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const YOUTUBE_URL = /https?:\\/\\/(?:(?:www\\.|m\\.)?youtube\\.com\\/(?:watch\\?(?:[^\\s]*&)?v=|shorts\\/|embed\\/)|youtu\\.be\\/)([A-Za-z0-9_-]{11})[^\\s]*/i;\n\nfunction parseYoutubeMessage(text) {\n  if (typeof text !== 'string' || text.length === 0) {\n    return { ok: false };\n  }\n  const match = text.match(YOUTUBE_URL);\n  if (!match) {\n    return { ok: false };\n  }\n  const url = match[0].replace(/[),.;!?]+$/, '');\n  const videoId = match[1];\n  const notas = `${text.slice(0, match.index)} ${text.slice(match.index + match[0].length)}`.replace(/\\s+/g, ' ').trim();\n  return { ok: true, url, videoId, notas };\n}\n\nfunction replyText(kind, payload = {}) {\n  switch (kind) {\n    case 'not_youtube':\n      return 'No pude guardar eso. Mándame un link de YouTube.';\n    case 'duplicate':\n      return 'Ese video ya está en la hoja.';\n    case 'incomplete':\n      return 'Lo guardé incompleto. Revisa la fila.';\n    case 'sheets_failed':\n      return 'No se guardó. Hubo un error con la hoja.';\n    case 'saved': {\n      const parts = [payload.marca, payload.modelo, payload.version, payload.anio].filter((part) => part !== undefined && part !== null && part !== '').join(' ');\n      const nicho = payload.nicho ? ` · ${payload.nicho}` : '';\n      return `Guardado: ${parts}${nicho}`;\n    }\n    default:\n      return 'No se guardó. Hubo un error con la hoja.';\n  }\n}\n\nconst payload = $input.first().json;\nconst message = payload.message ?? payload;\nconst text = message.text ?? message.caption ?? '';\nconst parsed = parseYoutubeMessage(text);\nconst chatId = message.chat?.id;\nif (!parsed.ok) {\n  return [{ json: { ok: false, kind: 'not_youtube', chatId, reply: replyText('not_youtube') } }];\n}\nreturn [{ json: { ...parsed, kind: 'pending', chatId, reply: '' } }];"
+      },
+      "id": "parse-message",
+      "name": "Parse message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "ok-true",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-youtube",
+      "name": "IF YouTube",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": {}
+      },
+      "id": "reply-not-youtube",
+      "name": "Reply not youtube",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [880, 220],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER_TELEGRAM_CREDENTIAL",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Cars",
+          "mode": "name"
+        },
+        "lookupColumn": "video_id",
+        "lookupValue": "={{ $json.videoId }}",
+        "options": {
+          "returnAllMatches": false
+        }
+      },
+      "id": "lookup-video",
+      "name": "Lookup video_id",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [880, 0],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER_SHEETS_CREDENTIAL",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsed = $('Parse message').first().json;\nconst lookup = $input.first().json;\nconst found = Boolean(lookup.video_id);\nfunction replyText(kind) {\n  if (kind === 'duplicate') return 'Ese video ya está en la hoja.';\n  return '';\n}\nif (found) {\n  return [{ json: { ...parsed, kind: 'duplicate', reply: replyText('duplicate'), isDuplicate: true } }];\n}\nreturn [{ json: { ...parsed, isDuplicate: false } }];"
+      },
+      "id": "mark-duplicate",
+      "name": "Mark duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "dup-true",
+              "leftValue": "={{ $json.isDuplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-duplicate",
+      "name": "IF duplicate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": {}
+      },
+      "id": "reply-duplicate",
+      "name": "Reply duplicate",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1540, 220],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER_TELEGRAM_CREDENTIAL",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.youtube.com/oembed?url={{ encodeURIComponent($json.url) }}&format=json",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "oembed",
+      "name": "YouTube oEmbed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=YouTube title: {{ $json.title }}\nChannel: {{ $json.author_name }}\n\nReturn JSON only.",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You extract structured car data from a YouTube video title.\nReturn JSON only with keys: marca, modelo, version, anio, carroceria, nicho, precio_estimado, confianza.\ncarroceria must be one of: suv, sedan, coupe, hatchback, wagon, convertible, pickup, van, crossover, or empty string.\nnicho must be one of: supercar, hypercar, grand_turismo, ultra_luxury, sports_sedan, muscle, suv_compacta, suv_mediana, suv_grande, off_road, pickup, or empty string.\nconfianza must be alta, media, or baja.\nLeave version empty if the title does not name a trim.\nLeave precio_estimado empty unless you can justify a USD number (JSON number, not a string).\nDo not invent values to fill the row.\nTitle and channel are input only; do not echo them as sheet columns."
+            }
+          ]
+        }
+      },
+      "id": "llm-extract",
+      "name": "LLM extract",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [1760, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "openai-model",
+      "name": "Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [1760, 220],
+      "credentials": {
+        "openAiApi": {
+          "id": "PLACEHOLDER_LLM_CREDENTIAL",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const CARROCERIA = ['suv','sedan','coupe','hatchback','wagon','convertible','pickup','van','crossover'];\nconst NICHO = ['supercar','hypercar','grand_turismo','ultra_luxury','sports_sedan','muscle','suv_compacta','suv_mediana','suv_grande','off_road','pickup'];\nconst CONFIANZA = ['alta','media','baja'];\n\nfunction pickEnum(value, list) {\n  return typeof value === 'string' && list.includes(value) ? value : '';\n}\nfunction asTrimmedString(value) {\n  return typeof value === 'string' ? value.trim() : '';\n}\nfunction asYear(value) {\n  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;\n  if (!Number.isInteger(n) || n < 1900 || n > 2100) return '';\n  return n;\n}\nfunction asPrice(value) {\n  return typeof value === 'number' && Number.isFinite(value) ? value : '';\n}\nfunction sanitizeEnrichment(raw) {\n  if (raw === null || raw === undefined || typeof raw !== 'object') {\n    return { marca: '', modelo: '', version: '', anio: '', carroceria: '', nicho: '', precio_estimado: '', confianza: 'baja' };\n  }\n  return {\n    marca: asTrimmedString(raw.marca),\n    modelo: asTrimmedString(raw.modelo),\n    version: asTrimmedString(raw.version),\n    anio: asYear(raw.anio),\n    carroceria: pickEnum(raw.carroceria, CARROCERIA),\n    nicho: pickEnum(raw.nicho, NICHO),\n    precio_estimado: asPrice(raw.precio_estimado),\n    confianza: pickEnum(raw.confianza, CONFIANZA) || 'baja',\n  };\n}\nfunction incompleteEnrichment() {\n  return { marca: '', modelo: '', version: '', anio: '', carroceria: '', nicho: '', precio_estimado: '', confianza: 'baja' };\n}\nfunction buildSheetRow({ videoId, url, notas, enrichment, now }) {\n  const e = enrichment ?? incompleteEnrichment();\n  const fecha = now.toISOString().slice(0, 10);\n  return [videoId, url, e.marca, e.modelo, e.version, e.anio, e.carroceria, e.nicho, e.precio_estimado, e.confianza, notas ?? '', fecha];\n}\nfunction replyText(kind, payload = {}) {\n  switch (kind) {\n    case 'incomplete':\n      return 'Lo guardé incompleto. Revisa la fila.';\n    case 'sheets_failed':\n      return 'No se guardó. Hubo un error con la hoja.';\n    case 'saved': {\n      const parts = [payload.marca, payload.modelo, payload.version, payload.anio].filter((part) => part !== undefined && part !== null && part !== '').join(' ');\n      const nicho = payload.nicho ? ` · ${payload.nicho}` : '';\n      return `Guardado: ${parts}${nicho}`;\n    }\n    default:\n      return 'No se guardó. Hubo un error con la hoja.';\n  }\n}\n\nconst parsed = $('Parse message').first().json;\nconst oembed = $('YouTube oEmbed').first().json;\nconst oembedOk = Boolean(oembed && oembed.title);\nlet raw;\ntry {\n  const llm = $('LLM extract').first().json;\n  const text = typeof llm.text === 'string' ? llm.text : (typeof llm.output === 'string' ? llm.output : null);\n  if (text) {\n    const cleaned = text.replace(/^```json\\s*/i, '').replace(/```$/i, '').trim();\n    raw = JSON.parse(cleaned);\n  } else if (llm && typeof llm === 'object') {\n    raw = llm;\n  }\n} catch (error) {\n  raw = null;\n}\nconst llmOk = raw !== null && typeof raw === 'object';\nconst enrichment = oembedOk && llmOk ? sanitizeEnrichment(raw) : incompleteEnrichment();\nconst kind = oembedOk && llmOk ? 'saved' : 'incomplete';\nconst row = buildSheetRow({\n  videoId: parsed.videoId,\n  url: parsed.url,\n  notas: parsed.notas,\n  enrichment,\n  now: new Date(),\n});\nreturn [{\n  json: {\n    ...parsed,\n    kind,\n    enrichment,\n    row,\n    video_id: row[0],\n    url: row[1],\n    marca: row[2],\n    modelo: row[3],\n    version: row[4],\n    anio: row[5],\n    carroceria: row[6],\n    nicho: row[7],\n    precio_estimado: row[8],\n    confianza: row[9],\n    notas: row[10],\n    fecha: row[11],\n    reply: replyText(kind, enrichment),\n  },\n}];"
+      },
+      "id": "build-row",
+      "name": "Build row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 0]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Cars",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "video_id": "={{ $json.video_id }}",
+            "url": "={{ $json.url }}",
+            "marca": "={{ $json.marca }}",
+            "modelo": "={{ $json.modelo }}",
+            "version": "={{ $json.version }}",
+            "anio": "={{ $json.anio }}",
+            "carroceria": "={{ $json.carroceria }}",
+            "nicho": "={{ $json.nicho }}",
+            "precio_estimado": "={{ $json.precio_estimado }}",
+            "confianza": "={{ $json.confianza }}",
+            "notas": "={{ $json.notas }}",
+            "fecha": "={{ $json.fecha }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "append-row",
+      "name": "Append row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2200, 0],
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER_SHEETS_CREDENTIAL",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function replyText(kind, payload = {}) {\n  switch (kind) {\n    case 'incomplete':\n      return 'Lo guardé incompleto. Revisa la fila.';\n    case 'sheets_failed':\n      return 'No se guardó. Hubo un error con la hoja.';\n    case 'saved': {\n      const parts = [payload.marca, payload.modelo, payload.version, payload.anio].filter((part) => part !== undefined && part !== null && part !== '').join(' ');\n      const nicho = payload.nicho ? ` · ${payload.nicho}` : '';\n      return `Guardado: ${parts}${nicho}`;\n    }\n    default:\n      return 'No se guardó. Hubo un error con la hoja.';\n  }\n}\n\nconst built = $('Build row').first().json;\nconst appendItem = $input.first();\nconst failed = Boolean(appendItem.error || appendItem.json?.error);\nif (failed) {\n  return [{ json: { ...built, kind: 'sheets_failed', reply: replyText('sheets_failed') } }];\n}\nreturn [{ json: { ...built, reply: replyText(built.kind, built.enrichment) } }];"
+      },
+      "id": "after-append",
+      "name": "After append",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": {}
+      },
+      "id": "reply-final",
+      "name": "Reply final",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2640, 0],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER_TELEGRAM_CREDENTIAL",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{ "node": "Allowlist", "type": "main", "index": 0 }]]
+    },
+    "Allowlist": {
+      "main": [[{ "node": "Parse message", "type": "main", "index": 0 }]]
+    },
+    "Parse message": {
+      "main": [[{ "node": "IF YouTube", "type": "main", "index": 0 }]]
+    },
+    "IF YouTube": {
+      "main": [
+        [{ "node": "Lookup video_id", "type": "main", "index": 0 }],
+        [{ "node": "Reply not youtube", "type": "main", "index": 0 }]
+      ]
+    },
+    "Lookup video_id": {
+      "main": [[{ "node": "Mark duplicate", "type": "main", "index": 0 }]]
+    },
+    "Mark duplicate": {
+      "main": [[{ "node": "IF duplicate", "type": "main", "index": 0 }]]
+    },
+    "IF duplicate": {
+      "main": [
+        [{ "node": "Reply duplicate", "type": "main", "index": 0 }],
+        [{ "node": "YouTube oEmbed", "type": "main", "index": 0 }]
+      ]
+    },
+    "YouTube oEmbed": {
+      "main": [[{ "node": "LLM extract", "type": "main", "index": 0 }]]
+    },
+    "LLM extract": {
+      "main": [[{ "node": "Build row", "type": "main", "index": 0 }]]
+    },
+    "Chat Model": {
+      "ai_languageModel": [[{ "node": "LLM extract", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Build row": {
+      "main": [[{ "node": "Append row", "type": "main", "index": 0 }]]
+    },
+    "Append row": {
+      "main": [
+        [{ "node": "After append", "type": "main", "index": 0 }],
+        [{ "node": "After append", "type": "main", "index": 0 }]
+      ]
+    },
+    "After append": {
+      "main": [[{ "node": "Reply final", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "00000000-0000-0000-0000-000000000001"
+}
